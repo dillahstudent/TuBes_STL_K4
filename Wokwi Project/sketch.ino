@@ -73,12 +73,29 @@ enum SystemState {
   STATE_LEVEL_1,
   STATE_LEVEL_2,
   STATE_MOVING,
-  STATE_STOP
+  STATE_STOP,
+  STATE_DOOR_OPEN,
+  STATE_DOOR_CLOSING,
+  STATE_DOOR_CLOSE
+};
+
+// Additional message types for LCD task
+enum AdditionalMessageType {
+  MESSAGE_WEIGHT = 0, 
+  MESSAGE_PROXIMITY,
+  MESSAGE_QUAKE,
+  MESSAGE_EMERGENCY,
+  MESSAGE_CLEAR_WEIGHT, 
+  MESSAGE_CLEAR_PROXIMITY, 
+  MESSAGE_CLEAR_QUAKE, 
+  MESSAGE_CLEAR_EMERGENCY 
+  // Add more message types as needed
 };
 
 // Task communication structures
 struct KeypadData {
   char key;
+  int keypadId; // Add this line
 };
 
 struct LoadCellData {
@@ -103,23 +120,27 @@ QueueHandle_t loadCellQueue;
 QueueHandle_t potentiometerQueue;
 QueueHandle_t ultrasonicQueue;
 QueueHandle_t stateQueue;
+QueueHandle_t buttonQueue;
+QueueHandle_t additionalMessageQueue;
 
 // Create task handler
 TaskHandle_t potentiometerTaskHandle  = NULL; // Task handle for the potentiometer task
 
 volatile SystemState currentState = STATE_LEVEL_1;
+volatile SystemState prevState = STATE_STOP;
+volatile SystemState doorState = STATE_DOOR_CLOSE;
 
 // Function prototypes
 void TaskLoadCell(void *pvParameters);
 void TaskPotentiometer(void *pvParameters);
 void TaskUltrasonic(void *pvParameters);
 void TaskBuzzer(void *pvParameters);
-void TaskButton(void *pvParameters);
 void TaskKeypad(void *pvParameters);
 void TaskLCD(void *pvParameters);
 void TaskStateMachine(void *pvParameters);
 
-volatile bool ledState = false;
+volatile bool ledStateButton1 = false;
+volatile bool ledStateButton2 = false;
 
 void setup() {
   // Initialize serial communication
@@ -137,8 +158,8 @@ void setup() {
   pinMode(BUTTON2_PIN, INPUT_PULLUP);
 
   // Attach interrupts to the buttons
-  attachInterrupt(digitalPinToInterrupt(BUTTON1_PIN), handleButton1Press, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(BUTTON2_PIN), handleButton2Press, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(BUTTON1_PIN), handleButton1Press, FALLING);
+  attachInterrupt(digitalPinToInterrupt(BUTTON2_PIN), handleButton2Press, FALLING);
 
   // Initialize the LCD
   lcd.begin(16, 2);
@@ -157,13 +178,14 @@ void setup() {
   potentiometerQueue = xQueueCreate(5, sizeof(PotentiometerData));
   ultrasonicQueue = xQueueCreate(5, sizeof(UltrasonicData));
   stateQueue = xQueueCreate(5, sizeof(StateData));
+  buttonQueue = xQueueCreate(10, sizeof(int));
+  additionalMessageQueue = xQueueCreate(5, sizeof(AdditionalMessageType));
 
   // Create tasks
   xTaskCreate(TaskLoadCell, "LoadCell", 256, NULL, 1, NULL);
   xTaskCreate(TaskPotentiometer, "Potentiometer", 256, NULL, 1, &potentiometerTaskHandle);
   xTaskCreate(TaskUltrasonic, "Ultrasonic", 256, NULL, 2, NULL); // Higher priority
   // xTaskCreate(TaskBuzzer, "Buzzer", 128, NULL, 1, NULL); // Same priority as other tasks
-  xTaskCreate(TaskButton, "Button", 128, NULL, 1, NULL); // Task to handle LED based on button press
   xTaskCreate(TaskKeypad, "Keypad", 256, NULL, 1, NULL); // Task to handle keypad input
   xTaskCreate(TaskLCD, "LCD", 256, NULL, 1, NULL); // Task to handle LCD display
   xTaskCreate(TaskStateMachine, "StateMachine", 256, NULL, 1, NULL); // Task to handle state machine
@@ -178,33 +200,17 @@ void loop() {
 
 // Interrupt service routines for the buttons
 void handleButton1Press() {
-  if (digitalRead(BUTTON1_PIN) == LOW) {
-    ledState = true;
-  } else {
-    ledState = false;
-  }
+  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+  int buttonId = 1;
+  xQueueSendFromISR(buttonQueue, &buttonId, &xHigherPriorityTaskWoken);
+  portYIELD_FROM_ISR();
 }
 
 void handleButton2Press() {
-  if (digitalRead(BUTTON2_PIN) == LOW) {
-    ledState = true;
-  } else {
-    ledState = false;
-  }
-}
-
-// Task to handle LED based on button press
-void TaskButton(void *pvParameters) {
-  (void) pvParameters;
-
-  while (1) {
-    if (ledState) {
-      digitalWrite(ledPin, HIGH);
-    } else {
-      digitalWrite(ledPin, LOW);
-    }
-    vTaskDelay(10 / portTICK_PERIOD_MS); // Small delay to debounce
-  }
+  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+  int buttonId = 2;
+  xQueueSendFromISR(buttonQueue, &buttonId, &xHigherPriorityTaskWoken);
+  portYIELD_FROM_ISR();
 }
 
 // In TaskKeypad, after reading the key, send it via queue
@@ -213,16 +219,24 @@ void TaskKeypad(void *pvParameters) {
   KeypadData data;
 
   while (1) {
+    // Check if any key is pressed for keypad 1
     char key1 = keypad1.getKey();
-    if (key1) {
+    if (key1 != NO_KEY) {
       data.key = key1;
+      data.keypadId = 1; // Add this line
       xQueueSend(keypadQueue, &data, portMAX_DELAY);
+      // Clear the keypad buffer
+      keypad1.getKeys();
     }
 
+    // Check if any key is pressed for keypad 2
     char key2 = keypad2.getKey();
-    if (key2) {
+    if (key2 != NO_KEY) {
       data.key = key2;
+      data.keypadId = 2; // Add this line
       xQueueSend(keypadQueue, &data, portMAX_DELAY);
+      // Clear the keypad buffer
+      keypad2.getKeys();
     }
 
     vTaskDelay(100 / portTICK_PERIOD_MS); // Check for key press every 100 ms
@@ -304,15 +318,58 @@ void TaskBuzzer(void *pvParameters) {
 // Task to handle LCD updates
 void TaskLCD(void *pvParameters) {
   (void) pvParameters;
-  LoadCellData loadCellData;
+  int timingCounterState = 0, timingCounterWarning = 0;
   StateData stateData;
+  StateData systemData, doorData;
+  AdditionalMessageType additionalMessage;
+  int additionalMessageArray[4] = {0,0,0,0};
 
   // Task loop
   while (1) {
     // Check for new state data
     if (xQueueReceive(stateQueue, &stateData, 0) == pdPASS) {
-      lcd.setCursor(0, 0);
-      switch (stateData.state) {
+      if(stateData.state >= STATE_DOOR_OPEN){
+        doorData.state = stateData.state;
+      } else {
+        systemData.state = stateData.state;
+      }
+    }
+
+    // Check for new additional messages
+    if (xQueueReceive(additionalMessageQueue, &additionalMessage, 0) == pdPASS) {
+      switch (additionalMessage){
+        case MESSAGE_WEIGHT:
+          additionalMessageArray[MESSAGE_WEIGHT] = 1;
+          break;
+        case MESSAGE_CLEAR_WEIGHT:
+          additionalMessageArray[MESSAGE_WEIGHT] = 0;
+          break;
+        case MESSAGE_PROXIMITY:
+          additionalMessageArray[MESSAGE_PROXIMITY] = 1;
+          break;
+        case MESSAGE_CLEAR_PROXIMITY:
+          additionalMessageArray[MESSAGE_PROXIMITY] = 0;
+          break;
+        case MESSAGE_QUAKE:
+          additionalMessageArray[MESSAGE_QUAKE] = 1;
+          break;
+        case MESSAGE_CLEAR_QUAKE:
+          additionalMessageArray[MESSAGE_QUAKE] = 0;
+          break;
+        case MESSAGE_EMERGENCY:
+          additionalMessageArray[MESSAGE_EMERGENCY] = 1;
+          break;
+        case MESSAGE_CLEAR_EMERGENCY:
+          additionalMessageArray[MESSAGE_EMERGENCY] = 0;
+          break;
+      }
+      
+      xQueueReset(additionalMessageQueue); // Empty the potentiometer queue
+    }
+
+    lcd.setCursor(0, 0);
+    if(timingCounterState == 0){
+      switch (systemData.state) {
         case STATE_LEVEL_1:
           lcd.print("State: LEVEL 1  ");
           break;
@@ -326,18 +383,66 @@ void TaskLCD(void *pvParameters) {
           lcd.print("State: STOP     ");
           break;
         default:
-          lcd.print("State: UNKNOWN  ");
+          break;
+      }
+    } else if(timingCounterState == 1){
+      switch (doorData.state) {
+        case STATE_DOOR_OPEN:
+          lcd.print("State: OPEN     ");
+          break;
+        case STATE_DOOR_CLOSING:
+          lcd.print("State: CLOSING  ");
+          break;
+        case STATE_DOOR_CLOSE:
+          lcd.print("State: CLOSED   ");
+          break;
+        default:
           break;
       }
     }
 
-    // Check for new load cell data
-    if (xQueueReceive(loadCellQueue, &loadCellData, 0) == pdPASS) {
-      lcd.setCursor(0, 1);
-      lcd.print("Weight: ");
-      lcd.print(loadCellData.weight);
-      lcd.print(" kg    ");
+    lcd.setCursor(0, 1); // Set cursor to second line
+    if(additionalMessageArray[timingCounterWarning] == 1){
+      switch(timingCounterWarning){
+        case MESSAGE_WEIGHT:
+          lcd.print("Overload        ");
+          break;
+        case MESSAGE_PROXIMITY:
+          lcd.print("Proximity       ");
+          break;
+        case MESSAGE_QUAKE:
+          lcd.print("Earthquake      ");
+          break;
+        case MESSAGE_EMERGENCY:
+          lcd.print("EMERGENCY       ");
+          break;
+        default:
+          break;
+      } 
+    } else if(additionalMessageArray[timingCounterWarning] == 0){
+      switch(timingCounterWarning){
+        case MESSAGE_WEIGHT:
+          lcd.print("Load is OK      ");
+          break;
+        case MESSAGE_PROXIMITY:
+          lcd.print("Door is Clear   ");
+          break;
+        case MESSAGE_QUAKE:
+          lcd.print("No Earthquake   ");
+          break;
+        case MESSAGE_EMERGENCY:
+          lcd.print("No Emergency    ");
+          break;
+        default:
+          break;
+      }
     }
+
+    timingCounterState++;
+    if(timingCounterState == 2) timingCounterState = 0;
+
+    timingCounterWarning++;
+    if(timingCounterWarning == 4) timingCounterWarning = 0;
 
     vTaskDelay(1000 / portTICK_PERIOD_MS); // Update the LCD every 1000 ms
   }
@@ -349,43 +454,153 @@ void TaskStateMachine(void *pvParameters) {
   KeypadData keypadData;
   PotentiometerData potentiometerData;
   UltrasonicData ultrasonicData;
+  LoadCellData loadCellData;
+  AdditionalMessageType additionalMessage;
+  int buttonId;
+  int timingCounter = 0;
 
   TaskHandle_t buzzerTaskHandle = NULL; // Task handle for the buzzer task
 
   // Task loop
   while (1) {
-    // Check for new keypad data
+    //Check for new keypad data
     if (xQueueReceive(keypadQueue, &keypadData, 0) == pdPASS) {
-      Serial.print("Keypad: ");
-      Serial.println(keypadData.key);
+      // Serial.print("Keypad ");
+      // Serial.print(keypadData.keypadId); // Print keypad identifier
+      // Serial.print(": ");
+      // Serial.println(keypadData.key);
       xQueueReset(keypadQueue); // Empty the keypad queue
     }
 
     // Check for new potentiometer data
     if (xQueueReceive(potentiometerQueue, &potentiometerData, 0) == pdPASS) {
-      Serial.print("Voltage: ");
-      Serial.print(potentiometerData.voltage);
-      Serial.println(" V     ");
+      // Serial.print("Voltage: ");
+      // Serial.print(potentiometerData.voltage);
+      // Serial.println(" V     ");
       xQueueReset(potentiometerQueue); // Empty the potentiometer queue
     }
 
     // Check for new ultrasonic sensor data
     if (xQueueReceive(ultrasonicQueue, &ultrasonicData, 0) == pdPASS) {
-      Serial.print("Distance: ");
-      Serial.print(ultrasonicData.distance);
-      Serial.println(" cm    ");
-      xQueueReset(ultrasonicQueue); // Empty the ultrasonic queue
+      // Serial.print("Distance: ");
+      // Serial.print(ultrasonicData.distance);
+      // Serial.println(" cm    ");
+      // xQueueReset(ultrasonicQueue); // Empty the ultrasonic queue
+    }
+
+    // Check for new load cell data
+    if (xQueueReceive(loadCellQueue, &loadCellData, 0) == pdPASS) {
+      // Serial.print("Weight: ");
+      // Serial.print(loadCellData.weight);
+      // Serial.println(" kg    ");
+      // xQueueReset(loadCellQueue); // Empty the load cell queue
+    }
+
+    // Check for new button data
+    if (xQueueReceive(buttonQueue, &buttonId, 0) == pdPASS) {
+      if (buttonId == 1) {
+        ledStateButton1 = !ledStateButton1;
+        Serial.println("Button 1 pressed");
+      } else if (buttonId == 2) {
+        ledStateButton2 = !ledStateButton2;
+        Serial.println("Button 2 pressed");
+      }
+      xQueueReset(buttonQueue); // Empty the button queue
     }
 
     switch (currentState) {
       case STATE_LEVEL_1:
-        // Perform actions for IDLE state
-        Serial.println("State: LEVEL 1");
-        stateData.state = STATE_LEVEL_1;
-        xQueueSend(stateQueue, &stateData, portMAX_DELAY);
-        // Transition to MEASURE state after some condition
-        vTaskDelay(2000 / portTICK_PERIOD_MS); // Wait for 2 seconds
-        currentState = STATE_LEVEL_2;
+        if(prevState != STATE_LEVEL_1){
+          Serial.println("State: LEVEL 1");
+
+          prevState = STATE_LEVEL_1;
+          stateData.state = STATE_LEVEL_1;
+          xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+
+          doorState = STATE_DOOR_OPEN;
+          stateData.state = STATE_DOOR_OPEN;
+          xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+        }
+
+        switch (doorState) {
+          case STATE_DOOR_OPEN:
+            if(loadCellData.weight > 4){
+              AdditionalMessageType warningMessage = MESSAGE_WEIGHT;
+              xQueueSend(additionalMessageQueue, &warningMessage, portMAX_DELAY);
+              
+              if (buzzerTaskHandle == NULL) {
+                xTaskCreate(TaskBuzzer, "Buzzer", 128, NULL, 1, &buzzerTaskHandle);
+              }
+
+              timingCounter = 0;
+            } else {
+              AdditionalMessageType warningMessage = MESSAGE_CLEAR_WEIGHT;
+              xQueueSend(additionalMessageQueue, &warningMessage, portMAX_DELAY);
+              
+              if (buzzerTaskHandle != NULL) {
+                // Delete the buzzer task
+                vTaskDelete(buzzerTaskHandle);
+                buzzerTaskHandle = NULL; // Reset task handle
+              }
+              timingCounter++;
+            }
+
+            if(timingCounter == 2*5){ //delay for 5 second (each loop is 500mS)
+              timingCounter = 0;
+              doorState = STATE_DOOR_CLOSING;
+              stateData.state = STATE_DOOR_CLOSING;
+              xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+            }
+            break;
+          
+          case STATE_DOOR_CLOSING:
+            if(ultrasonicData.distance < 200){
+              AdditionalMessageType warningMessage = MESSAGE_PROXIMITY;
+              xQueueSend(additionalMessageQueue, &warningMessage, portMAX_DELAY);
+              
+              if (buzzerTaskHandle == NULL) {
+                xTaskCreate(TaskBuzzer, "Buzzer", 128, NULL, 1, &buzzerTaskHandle);
+              }
+
+              timingCounter = 0;
+            } else {
+              AdditionalMessageType warningMessage = MESSAGE_CLEAR_PROXIMITY;
+              xQueueSend(additionalMessageQueue, &warningMessage, portMAX_DELAY);
+              
+              if (buzzerTaskHandle != NULL) {
+                // Delete the buzzer task
+                vTaskDelete(buzzerTaskHandle);
+                buzzerTaskHandle = NULL; // Reset task handle
+              }
+              timingCounter++;
+            }
+
+            if(timingCounter == 2*5){ //delay for 5 second (each loop is 500mS)
+              timingCounter = 0;
+              doorState = STATE_DOOR_CLOSE;
+              stateData.state = STATE_DOOR_CLOSE;
+              xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+            }
+            break;
+          
+          case STATE_DOOR_CLOSE:
+            if((keypadData.keypadId != 0) && (keypadData.key == '2')){
+              timingCounter = 0;
+              keypadData.keypadId = 0;
+              keypadData.key = 0;
+              prevState = STATE_LEVEL_1;
+              currentState = STATE_MOVING;
+              stateData.state = STATE_MOVING;
+              xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+            }
+            break;
+
+          default:
+            break;        
+        }
+
+        // vTaskDelay(2000 / portTICK_PERIOD_MS); // Wait for 2 seconds
+        // currentState = STATE_LEVEL_2;
         break;
 
       case STATE_LEVEL_2:
@@ -435,18 +650,18 @@ void TaskStateMachine(void *pvParameters) {
     }
 
     // Check if the system state is no longer STATE_STOP and the buzzer task is created
-    if (currentState != STATE_STOP && buzzerTaskHandle != NULL) {
-      // Delete the buzzer task
-      vTaskDelete(buzzerTaskHandle);
-      buzzerTaskHandle = NULL; // Reset task handle
-    }
+    // if (currentState != STATE_STOP && buzzerTaskHandle != NULL) {
+    //   // Delete the buzzer task
+    //   vTaskDelete(buzzerTaskHandle);
+    //   buzzerTaskHandle = NULL; // Reset task handle
+    // }
 
     // Check if the system state is no longer STATE_STOP 
-    if (currentState != STATE_STOP) {
-      // Change the priority of the potentiometer task back to 1
-      vTaskPrioritySet(potentiometerTaskHandle , 1);
-    }
+    // if (currentState != STATE_STOP) {
+    //   // Change the priority of the potentiometer task back to 1
+    //   vTaskPrioritySet(potentiometerTaskHandle , 1);
+    // }
 
-    vTaskDelay(100 / portTICK_PERIOD_MS); // Small delay to prevent task hogging
+    vTaskDelay(500 / portTICK_PERIOD_MS); // Small delay to prevent task hogging
   }
 }

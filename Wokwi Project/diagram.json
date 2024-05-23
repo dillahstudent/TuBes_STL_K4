@@ -24,7 +24,7 @@
       "top": -86.5,
       "left": 61.1,
       "rotate": 90,
-      "attrs": { "color": "green" }
+      "attrs": { "color": "green", "bounce": "0" }
     },
     {
       "type": "wokwi-pushbutton",
@@ -32,7 +32,7 @@
       "top": -86.5,
       "left": 3.5,
       "rotate": 90,
-      "attrs": { "color": "green" }
+      "attrs": { "color": "green", "bounce": "0" }
     },
     {
       "type": "wokwi-resistor",
