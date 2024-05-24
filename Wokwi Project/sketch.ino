@@ -72,7 +72,8 @@ Keypad keypad2 = Keypad(makeKeymap(keys2), rowPins2, colPins2, ROWS, COLS);
 enum SystemState {
   STATE_LEVEL_1,
   STATE_LEVEL_2,
-  STATE_MOVING,
+  STATE_MOVING_UP,
+  STATE_MOVING_DOWN,
   STATE_STOP,
   STATE_DOOR_OPEN,
   STATE_DOOR_CLOSING,
@@ -376,8 +377,11 @@ void TaskLCD(void *pvParameters) {
         case STATE_LEVEL_2:
           lcd.print("State: LEVEL 2  ");
           break;
-        case STATE_MOVING:
-          lcd.print("State: MOVING   ");
+        case STATE_MOVING_UP:
+          lcd.print("State: MOVING UP");
+          break;
+        case STATE_MOVING_DOWN:
+          lcd.print("State: MOVING DN");
           break;
         case STATE_STOP:
           lcd.print("State: STOP     ");
@@ -589,8 +593,15 @@ void TaskStateMachine(void *pvParameters) {
               keypadData.keypadId = 0;
               keypadData.key = 0;
               prevState = STATE_LEVEL_1;
-              currentState = STATE_MOVING;
-              stateData.state = STATE_MOVING;
+              currentState = STATE_MOVING_UP;
+              stateData.state = STATE_MOVING_UP;
+              xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+            } else if ((keypadData.keypadId == 1) && (keypadData.key == '*')) {
+              timingCounter = 0;
+              keypadData.keypadId = 0;
+              keypadData.key = 0;
+              doorState = STATE_DOOR_OPEN;
+              stateData.state = STATE_DOOR_OPEN;
               xQueueSend(stateQueue, &stateData, portMAX_DELAY);
             }
             break;
@@ -598,29 +609,152 @@ void TaskStateMachine(void *pvParameters) {
           default:
             break;        
         }
-
-        // vTaskDelay(2000 / portTICK_PERIOD_MS); // Wait for 2 seconds
-        // currentState = STATE_LEVEL_2;
         break;
 
       case STATE_LEVEL_2:
-        // Perform actions for MEASURE state
-        Serial.println("State: LEVEL 2");
-        stateData.state = STATE_LEVEL_2;
-        xQueueSend(stateQueue, &stateData, portMAX_DELAY);
-        // Trigger sensor reading tasks
-        vTaskDelay(2000 / portTICK_PERIOD_MS); // Simulate measurement time
-        currentState = STATE_MOVING;
+        if(prevState != STATE_LEVEL_2){
+          Serial.println("State: LEVEL 2");
+
+          prevState = STATE_LEVEL_2;
+          stateData.state = STATE_LEVEL_2;
+          xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+
+          doorState = STATE_DOOR_OPEN;
+          stateData.state = STATE_DOOR_OPEN;
+          xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+        }
+
+        switch (doorState) {
+          case STATE_DOOR_OPEN:
+            if(loadCellData.weight > 4){
+              AdditionalMessageType warningMessage = MESSAGE_WEIGHT;
+              xQueueSend(additionalMessageQueue, &warningMessage, portMAX_DELAY);
+              
+              if (buzzerTaskHandle == NULL) {
+                xTaskCreate(TaskBuzzer, "Buzzer", 128, NULL, 1, &buzzerTaskHandle);
+              }
+
+              timingCounter = 0;
+            } else {
+              AdditionalMessageType warningMessage = MESSAGE_CLEAR_WEIGHT;
+              xQueueSend(additionalMessageQueue, &warningMessage, portMAX_DELAY);
+              
+              if (buzzerTaskHandle != NULL) {
+                // Delete the buzzer task
+                vTaskDelete(buzzerTaskHandle);
+                buzzerTaskHandle = NULL; // Reset task handle
+              }
+              timingCounter++;
+            }
+
+            if(timingCounter == 2*5){ //delay for 5 second (each loop is 500mS)
+              timingCounter = 0;
+              doorState = STATE_DOOR_CLOSING;
+              stateData.state = STATE_DOOR_CLOSING;
+              xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+            }
+            break;
+          
+          case STATE_DOOR_CLOSING:
+            if(ultrasonicData.distance < 200){
+              AdditionalMessageType warningMessage = MESSAGE_PROXIMITY;
+              xQueueSend(additionalMessageQueue, &warningMessage, portMAX_DELAY);
+              
+              if (buzzerTaskHandle == NULL) {
+                xTaskCreate(TaskBuzzer, "Buzzer", 128, NULL, 1, &buzzerTaskHandle);
+              }
+
+              timingCounter = 0;
+            } else {
+              AdditionalMessageType warningMessage = MESSAGE_CLEAR_PROXIMITY;
+              xQueueSend(additionalMessageQueue, &warningMessage, portMAX_DELAY);
+              
+              if (buzzerTaskHandle != NULL) {
+                // Delete the buzzer task
+                vTaskDelete(buzzerTaskHandle);
+                buzzerTaskHandle = NULL; // Reset task handle
+              }
+              timingCounter++;
+            }
+
+            if(timingCounter == 2*5){ //delay for 5 second (each loop is 500mS)
+              timingCounter = 0;
+              doorState = STATE_DOOR_CLOSE;
+              stateData.state = STATE_DOOR_CLOSE;
+              xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+            }
+            break;
+          
+          case STATE_DOOR_CLOSE:
+            if((keypadData.keypadId != 0) && (keypadData.key == '1')){
+              timingCounter = 0;
+              keypadData.keypadId = 0;
+              keypadData.key = 0;
+              prevState = STATE_LEVEL_2;
+              currentState = STATE_MOVING_DOWN;
+              stateData.state = STATE_MOVING_DOWN;
+              xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+            } else if ((keypadData.keypadId == 2) && (keypadData.key == '*')) {
+              timingCounter = 0;
+              keypadData.keypadId = 0;
+              keypadData.key = 0;
+              doorState = STATE_DOOR_OPEN;
+              stateData.state = STATE_DOOR_OPEN;
+              xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+            }
+            break;
+
+          default:
+            break;        
+        }
         break;
 
-      case STATE_MOVING:
-        // Perform actions for DISPLAY state
-        Serial.println("State: MOVING");
-        stateData.state = STATE_MOVING;
-        xQueueSend(stateQueue, &stateData, portMAX_DELAY);
-        // Trigger display update task
-        vTaskDelay(2000 / portTICK_PERIOD_MS); // Simulate display update time
-        currentState = STATE_STOP;
+      case STATE_MOVING_UP:
+        if(prevState != STATE_MOVING_UP){
+          Serial.println("State: MOVING UP");
+
+          prevState = STATE_MOVING_UP;
+          stateData.state = STATE_MOVING_UP;
+          xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+
+          doorState = STATE_DOOR_CLOSE;
+          stateData.state = STATE_DOOR_CLOSE;
+          xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+        }
+
+        timingCounter++;
+
+        if(timingCounter == 2*10){ //delay for 10 second (each loop is 500mS)
+          timingCounter = 0;
+          prevState = STATE_MOVING_UP;
+          currentState = STATE_LEVEL_2;
+          stateData.state = STATE_LEVEL_2;
+          xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+        }
+        break;
+
+      case STATE_MOVING_DOWN:
+        if(prevState != STATE_MOVING_DOWN){
+          Serial.println("State: MOVING DOWN");
+
+          prevState = STATE_MOVING_DOWN;
+          stateData.state = STATE_MOVING_DOWN;
+          xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+
+          doorState = STATE_DOOR_CLOSE;
+          stateData.state = STATE_DOOR_CLOSE;
+          xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+        }
+
+        timingCounter++;
+
+        if(timingCounter == 2*10){ //delay for 10 second (each loop is 500mS)
+          timingCounter = 0;
+          prevState = STATE_MOVING_DOWN;
+          currentState = STATE_LEVEL_1;
+          stateData.state = STATE_LEVEL_1;
+          xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+        }
         break;
 
       case STATE_STOP:
