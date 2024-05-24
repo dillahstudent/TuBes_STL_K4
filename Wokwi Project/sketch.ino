@@ -75,6 +75,7 @@ enum SystemState {
   STATE_MOVING_UP,
   STATE_MOVING_DOWN,
   STATE_STOP,
+  STATE_EARTHQUAKE,
   STATE_DOOR_OPEN,
   STATE_DOOR_CLOSING,
   STATE_DOOR_CLOSE
@@ -115,6 +116,12 @@ struct StateData {
   SystemState state;
 };
 
+struct ButtonData {
+  int buttonId;
+  bool isRisingEdge; // Indicates whether it's a rising edge (true) or falling edge (false)
+};
+
+
 // Queues to communicate with the LCD task
 QueueHandle_t keypadQueue;
 QueueHandle_t loadCellQueue;
@@ -140,9 +147,6 @@ void TaskKeypad(void *pvParameters);
 void TaskLCD(void *pvParameters);
 void TaskStateMachine(void *pvParameters);
 
-volatile bool ledStateButton1 = false;
-volatile bool ledStateButton2 = false;
-
 void setup() {
   // Initialize serial communication
   Serial.begin(9600);
@@ -158,9 +162,9 @@ void setup() {
   pinMode(BUTTON1_PIN, INPUT_PULLUP);
   pinMode(BUTTON2_PIN, INPUT_PULLUP);
 
-  // Attach interrupts to the buttons
-  attachInterrupt(digitalPinToInterrupt(BUTTON1_PIN), handleButton1Press, FALLING);
-  attachInterrupt(digitalPinToInterrupt(BUTTON2_PIN), handleButton2Press, FALLING);
+  // Attach interrupts to the buttons with CHANGE mode
+  attachInterrupt(digitalPinToInterrupt(BUTTON1_PIN), handleButton1Change, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(BUTTON2_PIN), handleButton2Change, CHANGE);
 
   // Initialize the LCD
   lcd.begin(16, 2);
@@ -179,7 +183,7 @@ void setup() {
   potentiometerQueue = xQueueCreate(5, sizeof(PotentiometerData));
   ultrasonicQueue = xQueueCreate(5, sizeof(UltrasonicData));
   stateQueue = xQueueCreate(5, sizeof(StateData));
-  buttonQueue = xQueueCreate(10, sizeof(int));
+  buttonQueue = xQueueCreate(10, sizeof(ButtonData));
   additionalMessageQueue = xQueueCreate(5, sizeof(AdditionalMessageType));
 
   // Create tasks
@@ -199,18 +203,21 @@ void loop() {
   // Nothing here. FreeRTOS takes over.
 }
 
-// Interrupt service routines for the buttons
-void handleButton1Press() {
+void handleButton1Change() {
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-  int buttonId = 1;
-  xQueueSendFromISR(buttonQueue, &buttonId, &xHigherPriorityTaskWoken);
+  ButtonData buttonData;
+  buttonData.buttonId = 1;
+  buttonData.isRisingEdge = digitalRead(BUTTON1_PIN) == HIGH; // Check if it's a rising edge
+  xQueueSendFromISR(buttonQueue, &buttonData, &xHigherPriorityTaskWoken);
   portYIELD_FROM_ISR();
 }
 
-void handleButton2Press() {
+void handleButton2Change() {
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-  int buttonId = 2;
-  xQueueSendFromISR(buttonQueue, &buttonId, &xHigherPriorityTaskWoken);
+  ButtonData buttonData;
+  buttonData.buttonId = 2;
+  buttonData.isRisingEdge = digitalRead(BUTTON2_PIN) == HIGH; // Check if it's a rising edge
+  xQueueSendFromISR(buttonQueue, &buttonData, &xHigherPriorityTaskWoken);
   portYIELD_FROM_ISR();
 }
 
@@ -462,7 +469,7 @@ void TaskStateMachine(void *pvParameters) {
   UltrasonicData ultrasonicData;
   LoadCellData loadCellData;
   AdditionalMessageType additionalMessage;
-  int buttonId;
+  ButtonData buttonData;
   int timingCounter = 0;
 
   TaskHandle_t buzzerTaskHandle = NULL; // Task handle for the buzzer task
@@ -491,7 +498,7 @@ void TaskStateMachine(void *pvParameters) {
       // Serial.print("Distance: ");
       // Serial.print(ultrasonicData.distance);
       // Serial.println(" cm    ");
-      // xQueueReset(ultrasonicQueue); // Empty the ultrasonic queue
+      xQueueReset(ultrasonicQueue); // Empty the ultrasonic queue
     }
 
     // Check for new load cell data
@@ -499,18 +506,25 @@ void TaskStateMachine(void *pvParameters) {
       // Serial.print("Weight: ");
       // Serial.print(loadCellData.weight);
       // Serial.println(" kg    ");
-      // xQueueReset(loadCellQueue); // Empty the load cell queue
+      xQueueReset(loadCellQueue); // Empty the load cell queue
     }
 
     // Check for new button data
-    if (xQueueReceive(buttonQueue, &buttonId, 0) == pdPASS) {
-      if (buttonId == 1) {
-        ledStateButton1 = !ledStateButton1;
-        Serial.println("Button 1 pressed");
-      } else if (buttonId == 2) {
-        ledStateButton2 = !ledStateButton2;
-        Serial.println("Button 2 pressed");
-      }
+    if (xQueueReceive(buttonQueue, &buttonData, 0) == pdPASS) {
+      // Serial.print("Button: ");
+      // Serial.println(buttonData.buttonId);
+      // Serial.print("is Rising?: ");
+      // Serial.println(buttonData.isRisingEdge);
+      
+      // Process button press events based on button ID and edge
+      if (buttonData.isRisingEdge == false) {
+        prevState = currentState;
+        currentState = STATE_STOP;
+        stateData.state = STATE_STOP;
+        xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+        AdditionalMessageType warningMessage = MESSAGE_EMERGENCY;
+        xQueueSend(additionalMessageQueue, &warningMessage, portMAX_DELAY);
+      } 
       xQueueReset(buttonQueue); // Empty the button queue
     }
 
@@ -762,8 +776,6 @@ void TaskStateMachine(void *pvParameters) {
       case STATE_STOP:
         // Perform actions for DISPLAY state
         Serial.println("State: STOP");
-        stateData.state = STATE_STOP;
-        xQueueSend(stateQueue, &stateData, portMAX_DELAY);
         
         // Check if buzzer task is not already created
         if (buzzerTaskHandle == NULL) {
@@ -774,14 +786,29 @@ void TaskStateMachine(void *pvParameters) {
         // Change potentiometer task priority to 3
         vTaskPrioritySet(potentiometerTaskHandle , 3);
 
-        // Trigger display update task
-        vTaskDelay(2000 / portTICK_PERIOD_MS); // Simulate display update time
-        currentState = STATE_LEVEL_1; // Transition to next state
+        if (buttonData.isRisingEdge == true) {
+          xQueueReset(buttonQueue); // Empty the button queue
 
+          AdditionalMessageType warningMessage = MESSAGE_CLEAR_EMERGENCY;
+          xQueueSend(additionalMessageQueue, &warningMessage, portMAX_DELAY);
+        
+          // Delete the buzzer task
+          vTaskDelete(buzzerTaskHandle);
+          buzzerTaskHandle = NULL; // Reset task handle
+
+          // Change potentiometer task priority to 1
+          vTaskPrioritySet(potentiometerTaskHandle , 1);
+
+          currentState = prevState; // Transition to next state
+          prevState = STATE_STOP; // Transition to next state
+        } 
+        break;
+
+      case STATE_EARTHQUAKE:
         break;
 
       default:
-        currentState = STATE_LEVEL_1;
+        currentState = STATE_STOP;
         break;
     }
 
