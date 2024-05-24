@@ -330,6 +330,7 @@ void TaskLCD(void *pvParameters) {
   StateData stateData;
   StateData systemData, doorData;
   AdditionalMessageType additionalMessage;
+  BaseType_t xStatus;
   int additionalMessageArray[4] = {0,0,0,0};
 
   systemData.state = STATE_LEVEL_1;
@@ -338,13 +339,24 @@ void TaskLCD(void *pvParameters) {
   // Task loop
   while (1) {
     // Check for new state data
-    if (xQueueReceive(stateQueue, &stateData, 0) == pdPASS) {
-      if(stateData.state >= STATE_DOOR_OPEN){
-        doorData.state = stateData.state;
-      } else {
-        systemData.state = stateData.state;
-      }
-    }
+    do {
+        xStatus = xQueueReceive(stateQueue, &stateData, 0);
+        if (xStatus == pdPASS) {
+          if(stateData.state >= STATE_DOOR_OPEN){
+            doorData.state = stateData.state;
+          } else {
+            systemData.state = stateData.state;
+          }
+        }
+    } while (xStatus == pdPASS);
+
+    // if (xQueueReceive(stateQueue, &stateData, 0) == pdPASS) {
+    //   if(stateData.state >= STATE_DOOR_OPEN){
+    //     doorData.state = stateData.state;
+    //   } else {
+    //     systemData.state = stateData.state;
+    //   }
+    // }
 
     // Check for new additional messages
     if (xQueueReceive(additionalMessageQueue, &additionalMessage, 0) == pdPASS) {
@@ -395,6 +407,9 @@ void TaskLCD(void *pvParameters) {
       case STATE_STOP:
         lcd.print("STOP    ");
         break;
+      case STATE_EARTHQUAKE:
+        lcd.print("QUAKE   ");
+        break;
       default:
         break;
     }
@@ -424,7 +439,7 @@ void TaskLCD(void *pvParameters) {
           lcd.print("Proximity       ");
           break;
         case MESSAGE_QUAKE:
-          lcd.print("Earthquake      ");
+          lcd.print("EARTHQUAKE      ");
           break;
         case MESSAGE_EMERGENCY:
           lcd.print("EMERGENCY       ");
@@ -469,6 +484,7 @@ void TaskStateMachine(void *pvParameters) {
   UltrasonicData ultrasonicData;
   LoadCellData loadCellData;
   AdditionalMessageType additionalMessage;
+  AdditionalMessageType warningMessage;
   ButtonData buttonData;
   int timingCounter = 0;
 
@@ -491,6 +507,22 @@ void TaskStateMachine(void *pvParameters) {
       // Serial.print(potentiometerData.voltage);
       // Serial.println(" V     ");
       xQueueReset(potentiometerQueue); // Empty the potentiometer queue
+      
+      // Process potentiometer based on voltage
+      if ((potentiometerData.voltage > 1) && (currentState != STATE_EARTHQUAKE)) {
+        prevState = currentState;
+        currentState = STATE_EARTHQUAKE;
+        stateData.state = STATE_EARTHQUAKE;
+        xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+        warningMessage = MESSAGE_QUAKE;
+        xQueueSend(additionalMessageQueue, &warningMessage, portMAX_DELAY);
+        
+        // Check if buzzer task is not already created
+        if (buzzerTaskHandle == NULL) {
+          // Create the buzzer task
+          xTaskCreate(TaskBuzzer, "Buzzer", 128, NULL, 1, &buzzerTaskHandle);
+        }
+      }
     }
 
     // Check for new ultrasonic sensor data
@@ -517,13 +549,19 @@ void TaskStateMachine(void *pvParameters) {
       // Serial.println(buttonData.isRisingEdge);
       
       // Process button press events based on button ID and edge
-      if (buttonData.isRisingEdge == false) {
+      if ((buttonData.isRisingEdge == false) && (currentState != STATE_EARTHQUAKE)) {
         prevState = currentState;
         currentState = STATE_STOP;
         stateData.state = STATE_STOP;
         xQueueSend(stateQueue, &stateData, portMAX_DELAY);
-        AdditionalMessageType warningMessage = MESSAGE_EMERGENCY;
+        warningMessage = MESSAGE_EMERGENCY;
         xQueueSend(additionalMessageQueue, &warningMessage, portMAX_DELAY);
+        
+        // Check if buzzer task is not already created
+        if (buzzerTaskHandle == NULL) {
+          // Create the buzzer task
+          xTaskCreate(TaskBuzzer, "Buzzer", 128, NULL, 1, &buzzerTaskHandle);
+        }
       } 
       xQueueReset(buttonQueue); // Empty the button queue
     }
@@ -545,7 +583,7 @@ void TaskStateMachine(void *pvParameters) {
         switch (doorState) {
           case STATE_DOOR_OPEN:
             if(loadCellData.weight > 4){
-              AdditionalMessageType warningMessage = MESSAGE_WEIGHT;
+              warningMessage = MESSAGE_WEIGHT;
               xQueueSend(additionalMessageQueue, &warningMessage, portMAX_DELAY);
               
               if (buzzerTaskHandle == NULL) {
@@ -554,7 +592,7 @@ void TaskStateMachine(void *pvParameters) {
 
               timingCounter = 0;
             } else {
-              AdditionalMessageType warningMessage = MESSAGE_CLEAR_WEIGHT;
+              warningMessage = MESSAGE_CLEAR_WEIGHT;
               xQueueSend(additionalMessageQueue, &warningMessage, portMAX_DELAY);
               
               if (buzzerTaskHandle != NULL) {
@@ -575,7 +613,7 @@ void TaskStateMachine(void *pvParameters) {
           
           case STATE_DOOR_CLOSING:
             if(ultrasonicData.distance < 200){
-              AdditionalMessageType warningMessage = MESSAGE_PROXIMITY;
+              warningMessage = MESSAGE_PROXIMITY;
               xQueueSend(additionalMessageQueue, &warningMessage, portMAX_DELAY);
               
               if (buzzerTaskHandle == NULL) {
@@ -584,7 +622,7 @@ void TaskStateMachine(void *pvParameters) {
 
               timingCounter = 0;
             } else {
-              AdditionalMessageType warningMessage = MESSAGE_CLEAR_PROXIMITY;
+              warningMessage = MESSAGE_CLEAR_PROXIMITY;
               xQueueSend(additionalMessageQueue, &warningMessage, portMAX_DELAY);
               
               if (buzzerTaskHandle != NULL) {
@@ -595,7 +633,7 @@ void TaskStateMachine(void *pvParameters) {
               timingCounter++;
             }
 
-            if(timingCounter == 2*2){ //delay for 2 second (each loop is 500mS)
+            if(timingCounter == 2*4){ //delay for 4 second (each loop is 500mS)
               timingCounter = 0;
               doorState = STATE_DOOR_CLOSE;
               stateData.state = STATE_DOOR_CLOSE;
@@ -643,7 +681,7 @@ void TaskStateMachine(void *pvParameters) {
         switch (doorState) {
           case STATE_DOOR_OPEN:
             if(loadCellData.weight > 4){
-              AdditionalMessageType warningMessage = MESSAGE_WEIGHT;
+              warningMessage = MESSAGE_WEIGHT;
               xQueueSend(additionalMessageQueue, &warningMessage, portMAX_DELAY);
               
               if (buzzerTaskHandle == NULL) {
@@ -652,7 +690,7 @@ void TaskStateMachine(void *pvParameters) {
 
               timingCounter = 0;
             } else {
-              AdditionalMessageType warningMessage = MESSAGE_CLEAR_WEIGHT;
+              warningMessage = MESSAGE_CLEAR_WEIGHT;
               xQueueSend(additionalMessageQueue, &warningMessage, portMAX_DELAY);
               
               if (buzzerTaskHandle != NULL) {
@@ -673,7 +711,7 @@ void TaskStateMachine(void *pvParameters) {
           
           case STATE_DOOR_CLOSING:
             if(ultrasonicData.distance < 200){
-              AdditionalMessageType warningMessage = MESSAGE_PROXIMITY;
+              warningMessage = MESSAGE_PROXIMITY;
               xQueueSend(additionalMessageQueue, &warningMessage, portMAX_DELAY);
               
               if (buzzerTaskHandle == NULL) {
@@ -682,7 +720,7 @@ void TaskStateMachine(void *pvParameters) {
 
               timingCounter = 0;
             } else {
-              AdditionalMessageType warningMessage = MESSAGE_CLEAR_PROXIMITY;
+              warningMessage = MESSAGE_CLEAR_PROXIMITY;
               xQueueSend(additionalMessageQueue, &warningMessage, portMAX_DELAY);
               
               if (buzzerTaskHandle != NULL) {
@@ -693,7 +731,7 @@ void TaskStateMachine(void *pvParameters) {
               timingCounter++;
             }
 
-            if(timingCounter == 2*2){ //delay for 2 second (each loop is 500mS)
+            if(timingCounter == 2*4){ //delay for 4 second (each loop is 500mS)
               timingCounter = 0;
               doorState = STATE_DOOR_CLOSE;
               stateData.state = STATE_DOOR_CLOSE;
@@ -776,20 +814,77 @@ void TaskStateMachine(void *pvParameters) {
       case STATE_STOP:
         // Perform actions for DISPLAY state
         Serial.println("State: STOP");
-        
-        // Check if buzzer task is not already created
-        if (buzzerTaskHandle == NULL) {
-          // Create the buzzer task
-          xTaskCreate(TaskBuzzer, "Buzzer", 128, NULL, 1, &buzzerTaskHandle);
-        }
-
-        // Change potentiometer task priority to 3
-        vTaskPrioritySet(potentiometerTaskHandle , 3);
 
         if (buttonData.isRisingEdge == true) {
           xQueueReset(buttonQueue); // Empty the button queue
 
-          AdditionalMessageType warningMessage = MESSAGE_CLEAR_EMERGENCY;
+          warningMessage = MESSAGE_CLEAR_EMERGENCY;
+          xQueueSend(additionalMessageQueue, &warningMessage, portMAX_DELAY);
+        
+          // Delete the buzzer task
+          vTaskDelete(buzzerTaskHandle);
+          buzzerTaskHandle = NULL; // Reset task handle
+
+          currentState = prevState; // Transition to next state
+          prevState = STATE_STOP; // Transition to next state
+          stateData.state = currentState;
+          xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+        } 
+        break;
+
+      case STATE_EARTHQUAKE:
+        // Perform actions for DISPLAY state
+        Serial.println("State: EARTHQUAKE");
+
+        // Change potentiometer task priority to 3
+        vTaskPrioritySet(potentiometerTaskHandle , 3);
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+
+        if(prevState != STATE_LEVEL_1) {
+          warningMessage = MESSAGE_QUAKE;
+          xQueueSend(additionalMessageQueue, &warningMessage, portMAX_DELAY);
+
+          if(doorState != STATE_DOOR_CLOSE){
+            doorState = STATE_DOOR_CLOSING;
+            stateData.state = STATE_DOOR_CLOSING;
+            xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+            vTaskDelay(4000 / portTICK_PERIOD_MS);
+
+            doorState = STATE_DOOR_CLOSE;
+            stateData.state = STATE_DOOR_CLOSE;
+            xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+            vTaskDelay(10000 / portTICK_PERIOD_MS);
+          }
+
+          warningMessage = MESSAGE_QUAKE;
+          xQueueSend(additionalMessageQueue, &warningMessage, portMAX_DELAY);
+          
+          stateData.state = STATE_MOVING_DOWN;
+          xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+          vTaskDelay(10000 / portTICK_PERIOD_MS);
+          
+          warningMessage = MESSAGE_QUAKE;
+          xQueueSend(additionalMessageQueue, &warningMessage, portMAX_DELAY);
+
+          stateData.state = STATE_LEVEL_1;
+          xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+          vTaskDelay(1000 / portTICK_PERIOD_MS);
+
+          prevState = STATE_LEVEL_1;
+        }
+
+        if (prevState == STATE_LEVEL_1) {
+          stateData.state = STATE_EARTHQUAKE;
+          xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+          doorState = STATE_DOOR_OPEN;
+          stateData.state = STATE_DOOR_OPEN;
+          xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+        }
+
+        if (potentiometerData.voltage <= 1) {
+          xQueueReset(potentiometerQueue);
+
+          warningMessage = MESSAGE_CLEAR_QUAKE;
           xQueueSend(additionalMessageQueue, &warningMessage, portMAX_DELAY);
         
           // Delete the buzzer task
@@ -800,30 +895,16 @@ void TaskStateMachine(void *pvParameters) {
           vTaskPrioritySet(potentiometerTaskHandle , 1);
 
           currentState = prevState; // Transition to next state
-          prevState = STATE_STOP; // Transition to next state
-        } 
-        break;
-
-      case STATE_EARTHQUAKE:
+          prevState = STATE_EARTHQUAKE; // Transition to next state
+          stateData.state = currentState;
+          xQueueSend(stateQueue, &stateData, portMAX_DELAY);
+        }
         break;
 
       default:
         currentState = STATE_STOP;
         break;
     }
-
-    // Check if the system state is no longer STATE_STOP and the buzzer task is created
-    // if (currentState != STATE_STOP && buzzerTaskHandle != NULL) {
-    //   // Delete the buzzer task
-    //   vTaskDelete(buzzerTaskHandle);
-    //   buzzerTaskHandle = NULL; // Reset task handle
-    // }
-
-    // Check if the system state is no longer STATE_STOP 
-    // if (currentState != STATE_STOP) {
-    //   // Change the priority of the potentiometer task back to 1
-    //   vTaskPrioritySet(potentiometerTaskHandle , 1);
-    // }
 
     vTaskDelay(500 / portTICK_PERIOD_MS); // Small delay to prevent task hogging
   }
