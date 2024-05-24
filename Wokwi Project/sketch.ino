@@ -325,6 +325,9 @@ void TaskLCD(void *pvParameters) {
   AdditionalMessageType additionalMessage;
   int additionalMessageArray[4] = {0,0,0,0};
 
+  systemData.state = STATE_LEVEL_1;
+  doorData.state = STATE_DOOR_CLOSE;
+
   // Task loop
   while (1) {
     // Check for new state data
@@ -369,40 +372,39 @@ void TaskLCD(void *pvParameters) {
     }
 
     lcd.setCursor(0, 0);
-    if(timingCounterState == 0){
-      switch (systemData.state) {
-        case STATE_LEVEL_1:
-          lcd.print("State: LEVEL 1  ");
-          break;
-        case STATE_LEVEL_2:
-          lcd.print("State: LEVEL 2  ");
-          break;
-        case STATE_MOVING_UP:
-          lcd.print("State: MOVING UP");
-          break;
-        case STATE_MOVING_DOWN:
-          lcd.print("State: MOVING DN");
-          break;
-        case STATE_STOP:
-          lcd.print("State: STOP     ");
-          break;
-        default:
-          break;
-      }
-    } else if(timingCounterState == 1){
-      switch (doorData.state) {
-        case STATE_DOOR_OPEN:
-          lcd.print("State: OPEN     ");
-          break;
-        case STATE_DOOR_CLOSING:
-          lcd.print("State: CLOSING  ");
-          break;
-        case STATE_DOOR_CLOSE:
-          lcd.print("State: CLOSED   ");
-          break;
-        default:
-          break;
-      }
+    switch (systemData.state) {
+      case STATE_LEVEL_1:
+        lcd.print("LEVEL 1 ");
+        break;
+      case STATE_LEVEL_2:
+        lcd.print("LEVEL 2 ");
+        break;
+      case STATE_MOVING_UP:
+        lcd.print("MOVE UP ");
+        break;
+      case STATE_MOVING_DOWN:
+        lcd.print("MOVE DN ");
+        break;
+      case STATE_STOP:
+        lcd.print("STOP    ");
+        break;
+      default:
+        break;
+    }
+        
+    lcd.setCursor(8, 0);
+    switch (doorData.state) {
+      case STATE_DOOR_OPEN:
+        lcd.print("OPEN    ");
+        break;
+      case STATE_DOOR_CLOSING:
+        lcd.print("CLOSING ");
+        break;
+      case STATE_DOOR_CLOSE:
+        lcd.print("CLOSED  ");
+        break;
+      default:
+        break;
     }
 
     lcd.setCursor(0, 1); // Set cursor to second line
@@ -549,7 +551,7 @@ void TaskStateMachine(void *pvParameters) {
               timingCounter++;
             }
 
-            if(timingCounter == 2*5){ //delay for 5 second (each loop is 500mS)
+            if(timingCounter == 2*10){ //delay for 10 second (each loop is 500mS)
               timingCounter = 0;
               doorState = STATE_DOOR_CLOSING;
               stateData.state = STATE_DOOR_CLOSING;
@@ -579,7 +581,7 @@ void TaskStateMachine(void *pvParameters) {
               timingCounter++;
             }
 
-            if(timingCounter == 2*5){ //delay for 5 second (each loop is 500mS)
+            if(timingCounter == 2*2){ //delay for 2 second (each loop is 500mS)
               timingCounter = 0;
               doorState = STATE_DOOR_CLOSE;
               stateData.state = STATE_DOOR_CLOSE;
@@ -647,7 +649,7 @@ void TaskStateMachine(void *pvParameters) {
               timingCounter++;
             }
 
-            if(timingCounter == 2*5){ //delay for 5 second (each loop is 500mS)
+            if(timingCounter == 2*10){ //delay for 10 second (each loop is 500mS)
               timingCounter = 0;
               doorState = STATE_DOOR_CLOSING;
               stateData.state = STATE_DOOR_CLOSING;
@@ -677,7 +679,7 @@ void TaskStateMachine(void *pvParameters) {
               timingCounter++;
             }
 
-            if(timingCounter == 2*5){ //delay for 5 second (each loop is 500mS)
+            if(timingCounter == 2*2){ //delay for 2 second (each loop is 500mS)
               timingCounter = 0;
               doorState = STATE_DOOR_CLOSE;
               stateData.state = STATE_DOOR_CLOSE;
