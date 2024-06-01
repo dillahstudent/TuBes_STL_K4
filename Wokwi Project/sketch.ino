@@ -393,10 +393,10 @@ void TaskLCD(void *pvParameters) {
     lcd.setCursor(0, 0);
     switch (systemData.state) {
       case STATE_LEVEL_1:
-        lcd.print("LEVEL 1 ");
+        lcd.print("1ST FLR ");
         break;
       case STATE_LEVEL_2:
-        lcd.print("LEVEL 2 ");
+        lcd.print("2ND FLR ");
         break;
       case STATE_MOVING_UP:
         lcd.print("MOVE UP ");
@@ -405,10 +405,10 @@ void TaskLCD(void *pvParameters) {
         lcd.print("MOVE DN ");
         break;
       case STATE_STOP:
-        lcd.print("STOP    ");
+        lcd.print("STOPPED ");
         break;
       case STATE_EARTHQUAKE:
-        lcd.print("QUAKE   ");
+        lcd.print("ERTHQKE ");
         break;
       default:
         break;
@@ -417,13 +417,13 @@ void TaskLCD(void *pvParameters) {
     lcd.setCursor(8, 0);
     switch (doorData.state) {
       case STATE_DOOR_OPEN:
-        lcd.print("OPEN    ");
+        lcd.print("    OPEN");
         break;
       case STATE_DOOR_CLOSING:
-        lcd.print("CLOSING ");
+        lcd.print(" CLOSING");
         break;
       case STATE_DOOR_CLOSE:
-        lcd.print("CLOSED  ");
+        lcd.print("  CLOSED");
         break;
       default:
         break;
@@ -436,13 +436,13 @@ void TaskLCD(void *pvParameters) {
           lcd.print("Overload        ");
           break;
         case MESSAGE_PROXIMITY:
-          lcd.print("Proximity       ");
+          lcd.print("Door is Blocked ");
           break;
         case MESSAGE_QUAKE:
-          lcd.print("EARTHQUAKE      ");
+          lcd.print("Earthquake      ");
           break;
         case MESSAGE_EMERGENCY:
-          lcd.print("EMERGENCY       ");
+          lcd.print("Emergency       ");
           break;
         default:
           break;
