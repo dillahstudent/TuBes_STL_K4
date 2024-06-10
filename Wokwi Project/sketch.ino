@@ -1,48 +1,47 @@
+// Include all necessary library into the project
 #include <Arduino_FreeRTOS.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <HX711.h>
 #include <Keypad.h>
 #include <queue.h>
+#include <semphr.h>
 
-// Define LED pin (default is 13 for built-in LED on Arduino Mega)
-const int ledPin = 13;
-
-// HX711 circuit wiring
+// HX711 circuit connection
 const int LOADCELL_DOUT_PIN = 49;
 const int LOADCELL_SCK_PIN = 51;
 
-// Potentiometer pin
+// Potentiometer circuit connection
 const int POTENTIOMETER_PIN = A0;
 
-// Ultrasonic sensor pins
+// Ultrasonic sensor circuit connection
 const int TRIG_PIN = 9;
 const int ECHO_PIN = 8;
 
-// Buzzer pin
+// Buzzer circuit connection
 const int BUZZER_PIN = 18;
 
-// Button pins
+// Button circuit connection
 const int BUTTON1_PIN = 2;
 const int BUTTON2_PIN = 3;
 
-// Initialize the LCD library with the I2C address 0x27
+// Initialize LCD library with the I2C address 0x27, with 2 rows, each with 16 characters
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-// Initialize the HX711 library
+// Initialize HX711 library
 HX711 scale;
 
-// Define fixed multiplier for the load cell
+// Define fixed multiplier for load cell
 const float loadCellMultiplier = 0.00238; // Replace this with your actual calibration factor
 
-// Define variable for the ultrasonic sensor calibration
+// Define fixed multiplier for ultrasonic
 float ultrasonicMultiplier = 0.034245 / 2; // Initial calibration factor
 
 // Define the keypads' pins and keys
 const byte ROWS = 4; // Four rows
 const byte COLS = 4; // Four columns
 
-// Keypad 1
+// Keypad 1 pad definition
 char keys1[ROWS][COLS] = {
   {'1', '2', '3', 'A'},
   {'4', '5', '6', 'B'},
@@ -50,12 +49,13 @@ char keys1[ROWS][COLS] = {
   {'*', '0', '#', 'D'}
 };
 
+// Keypad 1 circuit connection
 byte rowPins1[ROWS] = {23, 22, 25, 24}; // R1, R2, R3, R4
 byte colPins1[COLS] = {27, 26, 29, 28}; // C1, C2, C3, C4
 
 Keypad keypad1 = Keypad(makeKeymap(keys1), rowPins1, colPins1, ROWS, COLS);
 
-// Keypad 2
+// Keypad 2 definition
 char keys2[ROWS][COLS] = {
   {'1', '2', '3', 'A'},
   {'4', '5', '6', 'B'},
@@ -63,6 +63,7 @@ char keys2[ROWS][COLS] = {
   {'*', '0', '#', 'D'}
 };
 
+// Keypad 2 circuit connection
 byte rowPins2[ROWS] = {31, 30, 33, 32}; // R1, R2, R3, R4
 byte colPins2[COLS] = {35, 34, 37, 36}; // C1, C2, C3, C4
 
@@ -94,7 +95,7 @@ enum AdditionalMessageType {
   // Add more message types as needed
 };
 
-// Task communication structures
+// Queues structures
 struct KeypadData {
   char key;
   int keypadId; // Add this line
@@ -121,8 +122,7 @@ struct ButtonData {
   bool isRisingEdge; // Indicates whether it's a rising edge (true) or falling edge (false)
 };
 
-
-// Queues to communicate with the LCD task
+// Queues to communicate between task
 QueueHandle_t keypadQueue;
 QueueHandle_t loadCellQueue;
 QueueHandle_t potentiometerQueue;
@@ -131,9 +131,13 @@ QueueHandle_t stateQueue;
 QueueHandle_t buttonQueue;
 QueueHandle_t additionalMessageQueue;
 
-// Create task handler
+// Semaphore to handel critical part
+SemaphoreHandle_t xMutex;
+
+// Create task handler for configurable tasks
 TaskHandle_t potentiometerTaskHandle  = NULL; // Task handle for the potentiometer task
 
+// Variable declaration for main state machine
 volatile SystemState currentState = STATE_LEVEL_1;
 volatile SystemState prevState = STATE_STOP;
 volatile SystemState doorState = STATE_DOOR_CLOSE;
@@ -147,6 +151,7 @@ void TaskKeypad(void *pvParameters);
 void TaskLCD(void *pvParameters);
 void TaskStateMachine(void *pvParameters);
 
+// System initialization
 void setup() {
   // Initialize serial communication
   Serial.begin(9600);
@@ -186,6 +191,9 @@ void setup() {
   buttonQueue = xQueueCreate(10, sizeof(ButtonData));
   additionalMessageQueue = xQueueCreate(5, sizeof(AdditionalMessageType));
 
+  // Create the mutex
+  xMutex = xSemaphoreCreateMutex();
+
   // Create tasks
   xTaskCreate(TaskLoadCell, "LoadCell", 256, NULL, 1, NULL);
   xTaskCreate(TaskPotentiometer, "Potentiometer", 256, NULL, 1, &potentiometerTaskHandle);
@@ -199,10 +207,12 @@ void setup() {
   vTaskStartScheduler();
 }
 
+// Main loop, does not used if using RTOS
 void loop() {
   // Nothing here. FreeRTOS takes over.
 }
 
+// Interrupt handler for emergency button in level 1
 void handleButton1Change() {
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
   ButtonData buttonData;
@@ -212,6 +222,7 @@ void handleButton1Change() {
   portYIELD_FROM_ISR();
 }
 
+// Interrupt handler for emergency button in level 1
 void handleButton2Change() {
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
   ButtonData buttonData;
@@ -221,7 +232,7 @@ void handleButton2Change() {
   portYIELD_FROM_ISR();
 }
 
-// In TaskKeypad, after reading the key, send it via queue
+// Task keypad to read user input on level 1 and level 2 
 void TaskKeypad(void *pvParameters) {
   (void) pvParameters;
   KeypadData data;
@@ -231,7 +242,7 @@ void TaskKeypad(void *pvParameters) {
     char key1 = keypad1.getKey();
     if (key1 != NO_KEY) {
       data.key = key1;
-      data.keypadId = 1; // Add this line
+      data.keypadId = 1; 
       xQueueSend(keypadQueue, &data, portMAX_DELAY);
       // Clear the keypad buffer
       keypad1.getKeys();
@@ -241,7 +252,7 @@ void TaskKeypad(void *pvParameters) {
     char key2 = keypad2.getKey();
     if (key2 != NO_KEY) {
       data.key = key2;
-      data.keypadId = 2; // Add this line
+      data.keypadId = 2; 
       xQueueSend(keypadQueue, &data, portMAX_DELAY);
       // Clear the keypad buffer
       keypad2.getKeys();
@@ -251,28 +262,26 @@ void TaskKeypad(void *pvParameters) {
   }
 }
 
-// Task to read from the load cell and send the value to the LCD task
+// Task load cell to read total weight of the lift
 void TaskLoadCell(void *pvParameters) {
   (void) pvParameters;
   LoadCellData data;
 
-  // Task loop
   while (1) {
     // Read the load cell value and convert it to weight
     float reading = scale.get_units(10); // Take an average of 10 readings
-    data.weight = reading * loadCellMultiplier;
+    data.weight = reading * loadCellMultiplier;// Convert the reading to kg
 
     xQueueSend(loadCellQueue, &data, portMAX_DELAY);
     vTaskDelay(1000 / portTICK_PERIOD_MS); // Wait for 1000 ms
   }
 }
 
-// Task to read the potentiometer value and send the voltage to the LCD task
+// Task potentiometer to read analog voltage for earthquake simulation
 void TaskPotentiometer(void *pvParameters) {
   (void) pvParameters;
   PotentiometerData data;
 
-  // Task loop
   while (1) {
     // Read the potentiometer value
     int sensorValue = analogRead(POTENTIOMETER_PIN);
@@ -283,12 +292,11 @@ void TaskPotentiometer(void *pvParameters) {
   }
 }
 
-// Task to read the ultrasonic sensor value and send the distance to the LCD task
+// Task ultrasonic to sense oject at the door
 void TaskUltrasonic(void *pvParameters) {
   (void) pvParameters;
   UltrasonicData data;
 
-  // Task loop
   while (1) {
     // Clear the trigPin
     digitalWrite(TRIG_PIN, LOW);
@@ -303,7 +311,7 @@ void TaskUltrasonic(void *pvParameters) {
     long duration = pulseIn(ECHO_PIN, HIGH);
 
     // Calculate the distance
-    data.distance = duration * ultrasonicMultiplier; // Use the calibration factor
+    data.distance = duration * ultrasonicMultiplier; // Convert the reading to cm
 
     xQueueSend(ultrasonicQueue, &data, portMAX_DELAY);
     vTaskDelay(500 / portTICK_PERIOD_MS); // Wait for 500 ms
@@ -336,7 +344,6 @@ void TaskLCD(void *pvParameters) {
   systemData.state = STATE_LEVEL_1;
   doorData.state = STATE_DOOR_CLOSE;
 
-  // Task loop
   while (1) {
     // Check for new state data
     do {
@@ -349,14 +356,6 @@ void TaskLCD(void *pvParameters) {
           }
         }
     } while (xStatus == pdPASS);
-
-    // if (xQueueReceive(stateQueue, &stateData, 0) == pdPASS) {
-    //   if(stateData.state >= STATE_DOOR_OPEN){
-    //     doorData.state = stateData.state;
-    //   } else {
-    //     systemData.state = stateData.state;
-    //   }
-    // }
 
     // Check for new additional messages
     if (xQueueReceive(additionalMessageQueue, &additionalMessage, 0) == pdPASS) {
@@ -390,80 +389,89 @@ void TaskLCD(void *pvParameters) {
       xQueueReset(additionalMessageQueue); // Empty the potentiometer queue
     }
 
-    lcd.setCursor(0, 0);
-    switch (systemData.state) {
-      case STATE_LEVEL_1:
-        lcd.print("1ST FLR ");
-        break;
-      case STATE_LEVEL_2:
-        lcd.print("2ND FLR ");
-        break;
-      case STATE_MOVING_UP:
-        lcd.print("MOVE UP ");
-        break;
-      case STATE_MOVING_DOWN:
-        lcd.print("MOVE DN ");
-        break;
-      case STATE_STOP:
-        lcd.print("STOPPED ");
-        break;
-      case STATE_EARTHQUAKE:
-        lcd.print("ERTHQKE ");
-        break;
-      default:
-        break;
-    }
-        
-    lcd.setCursor(8, 0);
-    switch (doorData.state) {
-      case STATE_DOOR_OPEN:
-        lcd.print("    OPEN");
-        break;
-      case STATE_DOOR_CLOSING:
-        lcd.print(" CLOSING");
-        break;
-      case STATE_DOOR_CLOSE:
-        lcd.print("  CLOSED");
-        break;
-      default:
-        break;
-    }
-
-    lcd.setCursor(0, 1); // Set cursor to second line
-    if(additionalMessageArray[timingCounterWarning] == 1){
-      switch(timingCounterWarning){
-        case MESSAGE_WEIGHT:
-          lcd.print("Overload        ");
+    // Take the mutex before accessing the LCD
+    if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE) {
+      // Update system status
+      lcd.setCursor(0, 0);
+      switch (systemData.state) {
+        case STATE_LEVEL_1:
+          lcd.print("1ST FLR ");
           break;
-        case MESSAGE_PROXIMITY:
-          lcd.print("Door is Blocked ");
+        case STATE_LEVEL_2:
+          lcd.print("2ND FLR ");
           break;
-        case MESSAGE_QUAKE:
-          lcd.print("Earthquake      ");
+        case STATE_MOVING_UP:
+          lcd.print("MOVE UP ");
           break;
-        case MESSAGE_EMERGENCY:
-          lcd.print("Emergency       ");
+        case STATE_MOVING_DOWN:
+          lcd.print("MOVE DN ");
           break;
-        default:
+        case STATE_STOP:
+          lcd.print("STOPPED ");
           break;
-      } 
-    } else if(additionalMessageArray[timingCounterWarning] == 0){
-      switch(timingCounterWarning){
-        case MESSAGE_WEIGHT:
-          lcd.print("Load is OK      ");
-          break;
-        case MESSAGE_PROXIMITY:
-          lcd.print("Door is Clear   ");
-          break;
-        case MESSAGE_QUAKE:
-          lcd.print("No Earthquake   ");
-          break;
-        case MESSAGE_EMERGENCY:
-          lcd.print("No Emergency    ");
+        case STATE_EARTHQUAKE:
+          lcd.print("ERTHQKE ");
           break;
         default:
           break;
       }
+          
+      // Update door status
+      lcd.setCursor(8, 0);
+      switch (doorData.state) {
+        case STATE_DOOR_OPEN:
+          lcd.print("    OPEN");
+          break;
+        case STATE_DOOR_CLOSING:
+          lcd.print(" CLOSING");
+          break;
+        case STATE_DOOR_CLOSE:
+          lcd.print("  CLOSED");
+          break;
+        default:
+          break;
+      }
+
+      // Update additional massage
+      lcd.setCursor(0, 1); // Set cursor to second line
+      if(additionalMessageArray[timingCounterWarning] == 1){
+        switch(timingCounterWarning){
+          case MESSAGE_WEIGHT:
+            lcd.print("Overload        ");
+            break;
+          case MESSAGE_PROXIMITY:
+            lcd.print("Door is Blocked ");
+            break;
+          case MESSAGE_QUAKE:
+            lcd.print("Earthquake      ");
+            break;
+          case MESSAGE_EMERGENCY:
+            lcd.print("Emergency       ");
+            break;
+          default:
+            break;
+        } 
+      } else if(additionalMessageArray[timingCounterWarning] == 0){
+        switch(timingCounterWarning){
+          case MESSAGE_WEIGHT:
+            lcd.print("Load is OK      ");
+            break;
+          case MESSAGE_PROXIMITY:
+            lcd.print("Door is Clear   ");
+            break;
+          case MESSAGE_QUAKE:
+            lcd.print("No Earthquake   ");
+            break;
+          case MESSAGE_EMERGENCY:
+            lcd.print("No Emergency    ");
+            break;
+          default:
+            break;
+        }
+      }
+
+      // Give the mutex back after accessing the LCD
+      xSemaphoreGive(xMutex);
     }
 
     timingCounterState++;
@@ -476,6 +484,7 @@ void TaskLCD(void *pvParameters) {
   }
 }
 
+// Task to control the main state machine
 void TaskStateMachine(void *pvParameters) {
   (void) pvParameters;
   StateData stateData;
@@ -490,7 +499,6 @@ void TaskStateMachine(void *pvParameters) {
 
   TaskHandle_t buzzerTaskHandle = NULL; // Task handle for the buzzer task
 
-  // Task loop
   while (1) {
     //Check for new keypad data
     if (xQueueReceive(keypadQueue, &keypadData, 0) == pdPASS) {
